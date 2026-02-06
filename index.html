@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dodge Room</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: #0f1115;
+      color: #e8e8e8;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 24px;
+      box-sizing: border-box;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 1.8rem;
+    }
+
+    .hud {
+      width: min(820px, 95vw);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .health-bar {
+      position: relative;
+      height: 20px;
+      background: #2a2f3a;
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid #3b4252;
+    }
+
+    .health-fill {
+      height: 100%;
+      width: 100%;
+      background: linear-gradient(90deg, #3bd36a, #1cbf4f);
+      transition: width 120ms linear;
+    }
+
+    .health-text {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.85rem;
+      color: #f5f5f5;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    }
+
+    .info {
+      font-size: 0.95rem;
+      color: #c2c9d6;
+    }
+
+    canvas {
+      background: radial-gradient(circle at 50% 50%, #1c2333, #101521 70%);
+      border-radius: 16px;
+      border: 1px solid #2b3345;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+      width: min(820px, 95vw);
+      height: auto;
+    }
+
+    .footer {
+      margin-top: 14px;
+      font-size: 0.85rem;
+      color: #9aa3b2;
+    }
+  </style>
+</head>
+<body>
+  <h1>Dodge Room</h1>
+  <div class="hud">
+    <div class="health-bar" aria-label="Barra de vida">
+      <div class="health-fill" id="healthFill"></div>
+      <div class="health-text" id="healthText">Vida: 100%</div>
+    </div>
+    <div class="info">
+      Mova com <strong>WASD</strong>, <strong>Setas</strong> ou tocando/clicando no canvas. Desvie das armadilhas que
+      surgem na sala. Pressione <strong>Espaço</strong> para reiniciar ao perder.
+    </div>
+  </div>
+  <canvas id="game" width="820" height="450"></canvas>
+  <div class="footer">Encostar em uma armadilha causa dano. Sobreviva o máximo possível.</div>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const healthFill = document.getElementById("healthFill");
+    const healthText = document.getElementById("healthText");
+
+    const state = {
+      width: 820,
+      height: 450,
+      roomPadding: 24,
+      deviceScale: window.devicePixelRatio || 1,
+      player: {
+        x: 820 / 2,
+        y: 450 / 2,
+        radius: 14,
+        speed: 220,
+        maxHealth: 100,
+        health: 100,
+        invulnTimer: 0,
+      },
+      traps: [],
+      trapSpawnTimer: 0,
+      trapSpawnInterval: 1.2,
+      gameOver: false,
+      timeSurvived: 0,
+      hasFocus: true,
+      pointer: {
+        active: false,
+        x: 0,
+        y: 0,
+      },
+    };
+
+    const keys = new Set();
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function rand(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    function spawnTrap() {
+      const size = rand(18, 36);
+      const x = rand(state.roomPadding + size, state.width - state.roomPadding - size);
+      const y = rand(state.roomPadding + size, state.height - state.roomPadding - size);
+      const lifetime = rand(6, 12);
+      state.traps.push({
+        x,
+        y,
+        size,
+        lifetime,
+        maxLifetime: lifetime,
+        active: false,
+        activationTimer: rand(0.4, 1.2),
+        vx: rand(-40, 40),
+        vy: rand(-40, 40),
+      });
+    }
+
+    function isPressed(...candidates) {
+      return candidates.some((key) => keys.has(key));
+    }
+
+    function updatePlayer(dt) {
+      const { player } = state;
+      let dx = 0;
+      let dy = 0;
+      if (isPressed("arrowup", "keyw", "w")) dy -= 1;
+      if (isPressed("arrowdown", "keys", "s")) dy += 1;
+      if (isPressed("arrowleft", "keya", "a")) dx -= 1;
+      if (isPressed("arrowright", "keyd", "d")) dx += 1;
+
+      if (dx === 0 && dy === 0 && state.pointer.active) {
+        const toX = state.pointer.x - player.x;
+        const toY = state.pointer.y - player.y;
+        const distance = Math.hypot(toX, toY);
+        if (distance > 8) {
+          dx = toX / distance;
+          dy = toY / distance;
+        }
+      }
+
+      if (dx !== 0 || dy !== 0) {
+        const length = Math.hypot(dx, dy);
+        dx /= length;
+        dy /= length;
+      }
+
+      player.x += dx * player.speed * dt;
+      player.y += dy * player.speed * dt;
+
+      player.x = clamp(player.x, state.roomPadding + player.radius, state.width - state.roomPadding - player.radius);
+      player.y = clamp(player.y, state.roomPadding + player.radius, state.height - state.roomPadding - player.radius);
+
+      if (player.invulnTimer > 0) {
+        player.invulnTimer = Math.max(0, player.invulnTimer - dt);
+      }
+    }
+
+    function updateTraps(dt) {
+      state.traps.forEach((trap) => {
+        trap.lifetime -= dt;
+        if (!trap.active) {
+          trap.activationTimer -= dt;
+          if (trap.activationTimer <= 0) {
+            trap.active = true;
+          }
+        }
+
+        trap.x += trap.vx * dt;
+        trap.y += trap.vy * dt;
+        const minX = state.roomPadding + trap.size;
+        const maxX = state.width - state.roomPadding - trap.size;
+        const minY = state.roomPadding + trap.size;
+        const maxY = state.height - state.roomPadding - trap.size;
+        if (trap.x <= minX || trap.x >= maxX) {
+          trap.vx *= -1;
+          trap.x = clamp(trap.x, minX, maxX);
+        }
+        if (trap.y <= minY || trap.y >= maxY) {
+          trap.vy *= -1;
+          trap.y = clamp(trap.y, minY, maxY);
+        }
+      });
+
+      state.traps = state.traps.filter((trap) => trap.lifetime > 0);
+    }
+
+    function checkCollisions() {
+      const { player } = state;
+      if (player.invulnTimer > 0 || state.gameOver) return;
+
+      for (const trap of state.traps) {
+        if (!trap.active) continue;
+        const dist = Math.hypot(player.x - trap.x, player.y - trap.y);
+        if (dist < player.radius + trap.size * 0.55) {
+          player.health = clamp(player.health - 18, 0, player.maxHealth);
+          player.invulnTimer = 0.6;
+          if (player.health <= 0) {
+            state.gameOver = true;
+          }
+          break;
+        }
+      }
+    }
+
+    function updateHud() {
+      const { player } = state;
+      const percent = (player.health / player.maxHealth) * 100;
+      healthFill.style.width = `${percent}%`;
+      if (percent > 60) {
+        healthFill.style.background = "linear-gradient(90deg, #3bd36a, #1cbf4f)";
+      } else if (percent > 30) {
+        healthFill.style.background = "linear-gradient(90deg, #f7c443, #e9a723)";
+      } else {
+        healthFill.style.background = "linear-gradient(90deg, #f04e4e, #d93232)";
+      }
+      healthText.textContent = `Vida: ${Math.round(percent)}%`;
+    }
+
+    function drawRoom() {
+      ctx.clearRect(0, 0, state.width, state.height);
+      ctx.strokeStyle = "rgba(140, 160, 185, 0.35)";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(
+        state.roomPadding,
+        state.roomPadding,
+        state.width - state.roomPadding * 2,
+        state.height - state.roomPadding * 2
+      );
+    }
+
+    function drawPlayer() {
+      const { player } = state;
+      ctx.save();
+      ctx.shadowColor = "rgba(80, 160, 255, 0.5)";
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = player.invulnTimer > 0 ? "#7bb7ff" : "#4a90ff";
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawTraps() {
+      state.traps.forEach((trap) => {
+        const progress = 1 - trap.lifetime / trap.maxLifetime;
+        const pulse = Math.sin(performance.now() / 180) * 0.15 + 0.85;
+        ctx.save();
+        if (trap.active) {
+          ctx.fillStyle = `rgba(239, 84, 84, ${0.85 * pulse})`;
+          ctx.strokeStyle = "rgba(255, 180, 180, 0.6)";
+        } else {
+          ctx.fillStyle = `rgba(255, 205, 94, ${0.45 + progress * 0.2})`;
+          ctx.strokeStyle = "rgba(255, 220, 150, 0.6)";
+        }
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(trap.x, trap.y - trap.size);
+        ctx.lineTo(trap.x + trap.size, trap.y + trap.size);
+        ctx.lineTo(trap.x - trap.size, trap.y + trap.size);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      });
+    }
+
+    function drawOverlay() {
+      if (!state.gameOver) return;
+      ctx.save();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+      ctx.fillRect(0, 0, state.width, state.height);
+      ctx.fillStyle = "#f4f4f4";
+      ctx.textAlign = "center";
+      ctx.font = "bold 32px sans-serif";
+      ctx.fillText("Fim de jogo", state.width / 2, state.height / 2 - 10);
+      ctx.font = "16px sans-serif";
+      ctx.fillText(
+        `Tempo sobrevivido: ${state.timeSurvived.toFixed(1)}s`,
+        state.width / 2,
+        state.height / 2 + 24
+      );
+      ctx.font = "14px sans-serif";
+      ctx.fillText("Pressione Espaço para reiniciar", state.width / 2, state.height / 2 + 50);
+      ctx.restore();
+    }
+
+    function drawFocusOverlay() {
+      if (state.hasFocus || state.gameOver) return;
+      ctx.save();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+      ctx.fillRect(0, 0, state.width, state.height);
+      ctx.fillStyle = "#f4f4f4";
+      ctx.textAlign = "center";
+      ctx.font = "bold 22px sans-serif";
+      ctx.fillText("Clique para começar", state.width / 2, state.height / 2 - 6);
+      ctx.font = "14px sans-serif";
+      ctx.fillText("Depois use WASD ou Setas para mover", state.width / 2, state.height / 2 + 20);
+      ctx.restore();
+    }
+
+    let lastTime = performance.now();
+
+    function gameLoop(now) {
+      const dt = Math.min(0.033, (now - lastTime) / 1000);
+      lastTime = now;
+
+      if (!state.gameOver) {
+        state.timeSurvived += dt;
+        updatePlayer(dt);
+
+        state.trapSpawnTimer -= dt;
+        if (state.trapSpawnTimer <= 0) {
+          spawnTrap();
+          state.trapSpawnInterval = Math.max(0.55, state.trapSpawnInterval - 0.02);
+          state.trapSpawnTimer = state.trapSpawnInterval;
+        }
+
+        updateTraps(dt);
+        checkCollisions();
+        updateHud();
+      }
+
+      drawRoom();
+      drawTraps();
+      drawPlayer();
+      drawOverlay();
+      drawFocusOverlay();
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    function normalizeKey(event) {
+      return event.key.toLowerCase();
+    }
+
+    function normalizeCode(event) {
+      return event.code.toLowerCase();
+    }
+
+    window.addEventListener("keydown", (event) => {
+      const key = normalizeKey(event);
+      const code = normalizeCode(event);
+      if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) {
+        event.preventDefault();
+      }
+      keys.add(key);
+      keys.add(code);
+      state.hasFocus = true;
+      if (state.gameOver && key === " ") {
+        resetGame();
+      }
+    });
+
+    window.addEventListener("keyup", (event) => {
+      keys.delete(normalizeKey(event));
+      keys.delete(normalizeCode(event));
+    });
+
+    function updatePointerPosition(event) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = state.width / rect.width;
+      const scaleY = state.height / rect.height;
+      state.pointer.x = (event.clientX - rect.left) * scaleX;
+      state.pointer.y = (event.clientY - rect.top) * scaleY;
+    }
+
+    canvas.addEventListener("pointerdown", (event) => {
+      state.hasFocus = true;
+      state.pointer.active = true;
+      updatePointerPosition(event);
+      canvas.focus();
+    });
+
+    canvas.addEventListener("pointermove", (event) => {
+      if (!state.pointer.active) return;
+      updatePointerPosition(event);
+    });
+
+    canvas.addEventListener("pointerup", () => {
+      state.pointer.active = false;
+    });
+
+    canvas.addEventListener("pointerleave", () => {
+      state.pointer.active = false;
+    });
+
+    window.addEventListener("blur", () => {
+      keys.clear();
+      state.hasFocus = false;
+      state.pointer.active = false;
+    });
+
+    function resetGame() {
+      state.player.health = state.player.maxHealth;
+      state.player.invulnTimer = 0;
+      state.player.x = state.width / 2;
+      state.player.y = state.height / 2;
+      state.traps = [];
+      state.trapSpawnInterval = 1.2;
+      state.trapSpawnTimer = 0;
+      state.gameOver = false;
+      state.timeSurvived = 0;
+      updateHud();
+    }
+
+    function setupCanvas() {
+      const scale = state.deviceScale;
+      canvas.width = Math.floor(state.width * scale);
+      canvas.height = Math.floor(state.height * scale);
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    }
+
+    canvas.setAttribute("tabindex", "0");
+    setupCanvas();
+    updateHud();
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
